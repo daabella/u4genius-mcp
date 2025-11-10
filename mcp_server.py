@@ -19,154 +19,78 @@ Ejecución local:
 La URL MCP a poner en ChatGPT Connector será, por ejemplo, https://<tu-host>/ (o /mcp si cambias el root_path).
 """
 
+# mcp_server.py
 from __future__ import annotations
-
 import os
-import json
 import httpx
-from typing import Any, Dict, List, Optional
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from typing import Any, Dict
 
-# SDK MCP (HTTP/SSE sobre FastAPI)
-from mcp.server.fastapi import FastAPIMCPServer
-from mcp.types import (
-    Tool,
-    ListToolsResult,
-    CallToolRequest,
-    CallToolResult,
-    Prompt,
-    ListPromptsResult,
-)
+from mcp.server.fastmcp import FastMCP  # SDK oficial, server moderno
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+from starlette.routing import Mount, Route
 
-# ===================== Config =====================
-APP_API_BASE = os.getenv("U4GENIUS_API_BASE", "https://u4genius-api.onrender.com")
+# ----------------- Config -----------------
+APP_API_BASE = os.getenv("U4GENIUS_API_BASE", "https://u4genius-api.onrender.com").rstrip("/")
 TIMEOUT = float(os.getenv("U4GENIUS_TIMEOUT", "25"))
 
-# ===================== App / MCP =====================
-app = FastAPI(title="U4Genius MCP Gateway")
-mcp = FastAPIMCPServer()
-
-# Health simple para Render/monitoring
-@app.get("/health")
-async def health():
-    return {"ok": True, "service": "u4genius-mcp"}
-
-# ========== Helpers HTTP ==========
+# ----------------- HTTP helpers -----------------
 async def _post_json(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    url = f"{APP_API_BASE.rstrip('/')}/{path.lstrip('/')}"
+    url = f"{APP_API_BASE}/{path.lstrip('/')}"
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         r = await client.post(url, json=payload)
         r.raise_for_status()
         return r.json()
 
 async def _get_json(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    url = f"{APP_API_BASE.rstrip('/')}/{path.lstrip('/')}"
+    url = f"{APP_API_BASE}/{path.lstrip('/')}"
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         r = await client.get(url, params=params)
         r.raise_for_status()
         return r.json()
 
-# ===================== Prompts MCP =====================
-@mcp.list_prompts()
-async def list_prompts() -> ListPromptsResult:
-    return ListPromptsResult(
-        prompts=[
-            Prompt(
-                name="conectar_compania",
-                description="Crea el mensaje adecuado para activar una compañía en sesión.",
-                arguments=[{"name": "company", "description": "Id de compañía (ej. EN)", "required": True}],
-            )
-        ]
-    )
+# ----------------- MCP server -----------------
+mcp = FastMCP("U4Genius MCP")
 
-# ===================== Tools MCP =====================
-@mcp.list_tools()
-async def list_tools() -> ListToolsResult:
-    return ListToolsResult(
-        tools=[
-            Tool(
-                name="inicializar_sesion",
-                description="Activa la sesión para una compañía y devuelve los browsers/reportes disponibles.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {"company": {"type": "string"}},
-                    "required": ["company"],
-                },
-            ),
-            Tool(
-                name="listar_reportes",
-                description="Devuelve lista de reportes disponibles de la sesión (atalho a inicializar_sesion si se pasa company).",
-                inputSchema={
-                    "type": "object",
-                    "properties": {"company": {"type": "string"}},
-                },
-            ),
-            Tool(
-                name="obtener_columnas",
-                description="Devuelve metadatos/columnas de un browser (Unit4 object).",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "objectid": {"type": "string"},
-                        "company": {"type": "string"},
-                    },
-                    "required": ["objectid", "company"],
-                },
-            ),
-            Tool(
-                name="consultar_reporte",
-                description="Ejecuta un reporte/browser para una compañía y periodo (contrato mínimo).",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "pregunta": {"type": "string", "description": "Texto natural con el nombre del reporte o consulta."}
-                    },
-                    "required": ["pregunta"],
-                },
-            ),
-        ]
-    )
+# Prompt opcional para guiar al agente a “conectar compañía”
+@mcp.prompt()
+def conectar_compania(company: str):
+    """Devuelve una frase modelo para iniciar sesión con una compañía."""
+    return f"Conectar a compañía {company}"
 
-@mcp.call_tool()
-async def call_tool(req: CallToolRequest) -> CallToolResult:
-    """Dispatcher de herramientas MCP → app.py (API propia)."""
-    name = req.name
-    args = req.arguments or {}
+# Tools MCP (se exponen al conector)
+@mcp.tool()
+async def inicializar_sesion(company: str) -> Dict[str, Any]:
+    """Activa la sesión para una compañía y devuelve browsers/reportes disponibles."""
+    if not company:
+        return {"error": "company requerido"}
+    return await _post_json("/inicializar_sesion", {"company": company})
 
-    try:
-        if name == "inicializar_sesion":
-            data = await _post_json("/inicializar_sesion", {"company": args.get("company", "").strip()})
-            # El API devuelve browsers; el asistente podrá presentarlos al usuario
-            return CallToolResult(content=[{"type": "json", "json": data}])
+@mcp.tool()
+async def listar_reportes(company: str | None = None) -> Dict[str, Any]:
+    """Alias: si llega company, llama a inicializar_sesion; si no, avisa."""
+    if company:
+        return await _post_json("/inicializar_sesion", {"company": company})
+    return {"warning": "Sin parámetro company. Llama primero a inicializar_sesion."}
 
-        if name == "listar_reportes":
-            company = (args.get("company") or "").strip()
-            if company:
-                data = await _post_json("/inicializar_sesion", {"company": company})
-            else:
-                # Si no se pasa company, no hay estado aquí; mantenemos la llamada idéntica para simplicidad
-                data = {"warning": "Sin parámetro company. Llama primero a inicializar_sesion."}
-            return CallToolResult(content=[{"type": "json", "json": data}])
+@mcp.tool()
+async def obtener_columnas(objectid: str, company: str) -> Dict[str, Any]:
+    """Devuelve metadatos/columnas de un browser (Unit4 object)."""
+    return await _get_json("/columnas", {"objectid": objectid, "company": company})
 
-        if name == "obtener_columnas":
-            data = await _get_json("/columnas", {"objectid": args.get("objectid"), "company": args.get("company")})
-            return CallToolResult(content=[{"type": "json", "json": data}])
+@mcp.tool()
+async def consultar_reporte(pregunta: str) -> Dict[str, Any]:
+    """Ejecuta una consulta usando el contrato actual del BFF."""
+    return await _post_json("/consultar_reporte", {"pregunta": pregunta})
 
-        if name == "consultar_reporte":
-            # Para compatibilidad temprana reutilizamos el contrato de app.py que acepta {pregunta}
-            data = await _post_json("/consultar_reporte", {"pregunta": args.get("pregunta", "")})
-            return CallToolResult(content=[{"type": "json", "json": data}])
+# ----------------- ASGI app -----------------
+async def health(_req):
+    return JSONResponse({"ok": True, "service": "u4genius-mcp"})
 
-        return CallToolResult(isError=True, content=[{"type": "text", "text": f"Tool no soportada: {name}"}])
-
-    except httpx.HTTPStatusError as e:
-        return CallToolResult(
-            isError=True,
-            content=[{"type": "text", "text": f"HTTP {e.response.status_code}: {e.response.text}"}],
-        )
-    except Exception as e:  # noqa: BLE001
-        return CallToolResult(isError=True, content=[{"type": "text", "text": f"Error: {e}"}])
-
-# Montar el transporte MCP en la app FastAPI raíz (en '/')
-app.mount("/", mcp.app)
+# Montamos el servidor MCP como ASGI (Streamable HTTP) en la raíz "/"
+app = Starlette(
+    routes=[
+        Route("/health", health),
+        Mount("/", app=mcp.create_asgi_app()),  # <-- MCP aquí
+    ]
+)
