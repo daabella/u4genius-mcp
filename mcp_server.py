@@ -25,7 +25,7 @@ import os
 import httpx
 from typing import Any, Dict
 
-from mcp.server.fastmcp import FastMCP  # SDK oficial, server moderno
+from mcp.server.fastmcp import FastMCP  # Servidor MCP (Streamable HTTP)
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
@@ -50,15 +50,16 @@ async def _get_json(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
         return r.json()
 
 # ----------------- MCP server -----------------
-mcp = FastMCP("U4Genius MCP")
+# Lo exponemos en la raíz "/" para que el Connector pueda hablar MCP ahí mismo.
+mcp = FastMCP("U4Genius MCP", streamable_http_path="/")
 
-# Prompt opcional para guiar al agente a “conectar compañía”
+# Prompt de ayuda (opcional)
 @mcp.prompt()
 def conectar_compania(company: str):
     """Devuelve una frase modelo para iniciar sesión con una compañía."""
     return f"Conectar a compañía {company}"
 
-# Tools MCP (se exponen al conector)
+# Tools MCP
 @mcp.tool()
 async def inicializar_sesion(company: str) -> Dict[str, Any]:
     """Activa la sesión para una compañía y devuelve browsers/reportes disponibles."""
@@ -87,10 +88,10 @@ async def consultar_reporte(pregunta: str) -> Dict[str, Any]:
 async def health(_req):
     return JSONResponse({"ok": True, "service": "u4genius-mcp"})
 
-# Montamos el servidor MCP como ASGI (Streamable HTTP) en la raíz "/"
+# Montaje correcto para Streamable HTTP
 app = Starlette(
     routes=[
         Route("/health", health),
-        Mount("/", app=mcp.create_asgi_app()),  # <-- MCP aquí
+        Mount("/", app=mcp.streamable_http_app()),
     ]
 )
