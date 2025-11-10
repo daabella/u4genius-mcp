@@ -52,16 +52,18 @@ async def inicializar_sesion(company: str) -> Dict[str, Any]:
     if not company:
         return {"error": "company requerido"}
     data = await _post_json("/inicializar_sesion", {"company": company})
+    print "MCP - 1"
     MCP_SESSION["session_id"] = data.get("session_id") or str(uuid4())
     MCP_SESSION["company"] = data.get("company")
     MCP_SESSION["available_queries"] = data.get("available_queries", [])
-
+    print "MCP - 2"
     consultas = MCP_SESSION["available_queries"]
     if consultas:
         bullets = "\n".join([f"• {c.get('reportname') or c.get('objectid')} (objectid: {c.get('objectid')})" for c in consultas])
         msg = f"✅ Compañía cambiada a {company}.\nEstas son las consultas disponibles:\n{bullets}"
     else:
         msg = f"✅ Compañía cambiada a {company}. No se encontraron consultas."
+    print "MCP - 3"    
     return {"message": msg, **{k: MCP_SESSION[k] for k in ("company","session_id","available_queries")}}
 
 @mcp.tool()
