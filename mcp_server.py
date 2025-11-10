@@ -26,9 +26,6 @@ import httpx
 from typing import Any, Dict
 
 from mcp.server.fastmcp import FastMCP  # Servidor MCP (Streamable HTTP)
-from starlette.applications import Starlette
-from starlette.responses import JSONResponse
-from starlette.routing import Mount, Route
 
 # ----------------- Config -----------------
 APP_API_BASE = os.getenv("U4GENIUS_API_BASE", "https://u4genius-api.onrender.com").rstrip("/")
@@ -50,7 +47,7 @@ async def _get_json(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
         return r.json()
 
 # ----------------- MCP server -----------------
-# Lo exponemos en la raíz "/" para que el Connector pueda hablar MCP ahí mismo.
+# IMPORTANTE: exponer en la raíz "/" para que reciba lifespan.
 mcp = FastMCP("U4Genius MCP", streamable_http_path="/")
 
 # Prompt de ayuda (opcional)
@@ -84,14 +81,6 @@ async def consultar_reporte(pregunta: str) -> Dict[str, Any]:
     """Ejecuta una consulta usando el contrato actual del BFF."""
     return await _post_json("/consultar_reporte", {"pregunta": pregunta})
 
-# ----------------- ASGI app -----------------
-async def health(_req):
-    return JSONResponse({"ok": True, "service": "u4genius-mcp"})
-
-# Montaje correcto para Streamable HTTP
-app = Starlette(
-    routes=[
-        Route("/health", health),
-        Mount("/", app=mcp.streamable_http_app()),
-    ]
-)
+# ----------------- ASGI app raíz -----------------
+# No envolvemos con Starlette; así el MCP recibe lifespan.
+app = mcp.streamable_http_app()
