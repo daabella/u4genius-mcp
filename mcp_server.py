@@ -23,64 +23,114 @@ La URL MCP a poner en ChatGPT Connector será, por ejemplo, https://<tu-host>/ (
 from __future__ import annotations
 import os
 import httpx
-from typing import Any, Dict
+from typing import Any, Dict, Optional
+from uuid import uuid4
 
 from mcp.server.fastmcp import FastMCP  # Servidor MCP (Streamable HTTP)
 
-# ----------------- Config -----------------
 APP_API_BASE = os.getenv("U4GENIUS_API_BASE", "https://u4genius-api.onrender.com").rstrip("/")
 TIMEOUT = float(os.getenv("U4GENIUS_TIMEOUT", "25"))
 
+# ====== Estado en memoria del MCP (demo) ======
+MCP_SESSION: Dict[str, Any] = {
+    "session_id": None,
+    "company": None,
+    "available_queries": []
+}
+
 # ----------------- HTTP helpers -----------------
-async def _post_json(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+async def _post_json(path: str, payload: Dict[str, Any], session_id: Optional[str] = None) -> Dict[str, Any]:
     url = f"{APP_API_BASE}/{path.lstrip('/')}"
+    headers = {}
+    if session_id:
+        headers["X-Session-Id"] = session_id
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-        r = await client.post(url, json=payload)
+        r = await client.post(url, json=payload, headers=headers)
         r.raise_for_status()
         return r.json()
 
-async def _get_json(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
+async def _get_json(path: str, params: Dict[str, Any], session_id: Optional[str] = None) -> Dict[str, Any]:
     url = f"{APP_API_BASE}/{path.lstrip('/')}"
+    headers = {}
+    if session_id:
+        headers["X-Session-Id"] = session_id
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-        r = await client.get(url, params=params)
+        r = await client.get(url, params=params, headers=headers)
         r.raise_for_status()
         return r.json()
 
 # ----------------- MCP server -----------------
-# IMPORTANTE: exponer en la raíz "/" para que reciba lifespan.
 mcp = FastMCP("U4Genius MCP", streamable_http_path="/")
 
-# Prompt de ayuda (opcional)
 @mcp.prompt()
 def conectar_compania(company: str):
-    """Devuelve una frase modelo para iniciar sesión con una compañía."""
     return f"Conectar a compañía {company}"
 
-# Tools MCP
 @mcp.tool()
 async def inicializar_sesion(company: str) -> Dict[str, Any]:
-    """Activa la sesión para una compañía y devuelve browsers/reportes disponibles."""
+    """
+    Activa sesión para una compañía:
+    - Llama a /inicializar_sesion (BFF)
+    - Guarda session_id, company y available_queries en el MCP
+    - Devuelve un resumen + lista de consultas
+    """
     if not company:
         return {"error": "company requerido"}
-    return await _post_json("/inicializar_sesion", {"company": company})
+
+    data = await _post_json("/inicializar_sesion", {"company": company})
+    # Persistir en MCP
+    MCP_SESSION["session_id"] = data.get("session_id") or str(uuid4())
+    MCP_SESSION["company"] = data.get("company")
+    MCP_SESSION["available_queries"] = data.get("available_queries", [])
+
+    # Respuesta legible
+    consultas = MCP_SESSION["available_queries"]
+    if not consultas:
+        msg = f"✅ Compañía cambiada a {company}. No se encontraron consultas."
+    else:
+        lines = [f"• {c.get('reportname') or c.get('objectid')} (objectid: {c.get('objectid')})" for c in consultas]
+        msg = "Estas son las consultas disponibles:\n" + "\n".join(lines)
+
+    return {
+        "message": data.get("message") or msg,
+        "company": MCP_SESSION["company"],
+        "session_id": MCP_SESSION["session_id"],
+        "available_queries": consultas,
+    }
 
 @mcp.tool()
-async def listar_reportes(company: str | None = None) -> Dict[str, Any]:
-    """Alias: si llega company, llama a inicializar_sesion; si no, avisa."""
-    if company:
-        return await _post_json("/inicializar_sesion", {"company": company})
-    return {"warning": "Sin parámetro company. Llama primero a inicializar_sesion."}
+async def listar_reportes() -> Dict[str, Any]:
+    """
+    Devuelve las consultas disponibles guardadas en la sesión del MCP.
+    """
+    if not MCP_SESSION.get("company"):
+        return {"warning": "No hay compañía activa. Llama primero a inicializar_sesion(company='EN')."}
+    return {
+        "company": MCP_SESSION["company"],
+        "session_id": MCP_SESSION["session_id"],
+        "available_queries": MCP_SESSION.get("available_queries", []),
+    }
 
 @mcp.tool()
-async def obtener_columnas(objectid: str, company: str) -> Dict[str, Any]:
-    """Devuelve metadatos/columnas de un browser (Unit4 object)."""
-    return await _get_json("/columnas", {"objectid": objectid, "company": company})
+async def obtener_columnas(objectid: str, company: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Devuelve metadatos/columnas de un browser (Unit4 object).
+    Usa el company/session_id de la sesión si no se pasan.
+    """
+    company = company or MCP_SESSION.get("company")
+    if not company:
+        return {"error": "company requerido (o inicializa sesión primero)"}
+    sid = MCP_SESSION.get("session_id")
+    return await _get_json("/columnas", {"objectid": objectid, "company": company}, session_id=sid)
 
 @mcp.tool()
 async def consultar_reporte(pregunta: str) -> Dict[str, Any]:
-    """Ejecuta una consulta usando el contrato actual del BFF."""
-    return await _post_json("/consultar_reporte", {"pregunta": pregunta})
+    """
+    Ejecuta una consulta usando el contrato actual del BFF.
+    Pasa X-Session-Id si existe.
+    """
+    sid = MCP_SESSION.get("session_id")
+    return await _post_json("/consultar_reporte", {"pregunta": pregunta}, session_id=sid)
 
-# ----------------- ASGI app raíz -----------------
-# No envolvemos con Starlette; así el MCP recibe lifespan.
+# App ASGI raíz (transporte MCP)
 app = mcp.streamable_http_app()
